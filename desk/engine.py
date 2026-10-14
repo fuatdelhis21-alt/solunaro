@@ -32,11 +32,19 @@ def experiment_id(cfg: dict) -> str:
         "prompts": [A.ATLAS, A.VEGA, A.ORION, A.LUNA, A.TITAN, A.NOVA],
         "paper": cfg.get("paper"), "baseline": {**DEFAULT_BASELINE, **(cfg.get("baseline") or {})},
         "prefilter": cfg.get("prefilter"), "model": (cfg.get("llm") or {}).get("model"),
-        "models": (cfg.get("llm") or {}).get("models"), "markets": cfg.get("markets"),
+        "models": (cfg.get("llm") or {}).get("models"), "effort": (cfg.get("llm") or {}).get("effort"),
+        "markets": cfg.get("markets"),
         "min_news": (cfg.get("data") or {}).get("min_news_items"),
     }, sort_keys=True, default=str)
     name = cfg.get("experiment_name") or "exp"
     return f"{name}-{hashlib.sha1(blob.encode()).hexdigest()[:8]}"
+
+
+def min_news_for(dcfg: dict, kind: str) -> int:
+    """`min_news_items` is either one number for all markets or a per-kind map,
+    e.g. {crypto: 1, dex: 0}: Solana pool tokens rarely appear in mainstream RSS."""
+    v = dcfg.get("min_news_items", 0)
+    return int(v.get(kind, 0)) if isinstance(v, dict) else int(v)
 
 
 class Engine:
@@ -306,9 +314,10 @@ class Engine:
         setup = vega.get("setup") if vega.get("verdict") == "SETUP" else None
         rk = risk.evaluate(setup, price, summ, p, self._account(self.broker, pick, s),
                            s.fee_bps, s.slippage_bps)
-        if len(rel_news) < dcfg["min_news_items"]:
+        need = min_news_for(dcfg, s.kind)
+        if len(rel_news) < need:
             rk["checks"].append({"name": "news_available", "result": "FAIL",
-                                 "issue": f"{len(rel_news)} recent news items < {dcfg['min_news_items']}"})
+                                 "issue": f"{len(rel_news)} recent news items < {need}"})
             rk["all_pass"] = False
         report["CODE_RISK"] = rk
         reports = {"ATLAS": atlas, "VEGA": vega, "ORION": orion, "LUNA": luna}

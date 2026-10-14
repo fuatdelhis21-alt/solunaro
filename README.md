@@ -30,7 +30,7 @@ Veri (kod)  →  ATLAS  →  VEGA ┐
 - Tek seferde en fazla 1 açık pozisyon. Günde en fazla 5 işlem. Gün içi zarar %1'e ulaşırsa o gün yeni işlem yok. Aynı piyasa için 3 saat bekleme süresi.
 - 90 dakikadan eski veriyle karar verilmez. Bu durumda LLM hiç çağrılmaz, ücret çıkmaz.
 - DEX havuzu 250 bin $ likidite ve 500 bin $ 24 saatlik hacim altındaysa uygun sayılmaz.
-- İlgili güncel haber yoksa işlem açılmaz (`min_news_items`).
+- İlgili güncel haber yoksa işlem açılmaz (`min_news_items`). Varsayılan: kripto için en az 1 haber, DEX havuzları için şart yok (Solana tokenları ana akım RSS'te nadiren çıkar).
 - Açık pozisyon varken karar döngüsü çalışmaz. Sadece stop/hedef takip edilir, böylece token harcanmaz.
 - Aynı mumda hem stop hem hedef görülürse önce stop'a değdiği varsayılır (muhafazakâr). Fiyat boşlukla açılırsa işlem mumun açılış fiyatından kapanır.
 - **Kill switch:** proje klasöründe `STOP` adlı bir dosya oluştur. Bot yeni işlem açmayı bırakır, açık pozisyonu da kapatır.
@@ -90,7 +90,9 @@ Bu komut baseline kuralını geçmiş mumlar üzerinde, canlıdaki risk kurallar
 ## Maliyet düşürme
 
 - **Ön filtre:** Baseline kuralının aday saymadığı piyasalar LLM'e hiç gönderilmez. ATLAS yalnızca uygun piyasaları görür. Bunu `prefilter.enabled: false` ile kapatabilirsin.
-- **Ajan bazında model:** `llm.models` altında örneğin ATLAS ve LUNA'ya daha ucuz bir model atayabilirsin.
+- **Ajan bazında model:** `llm.models` altında örneğin ATLAS ve LUNA'ya `claude-haiku-5-5` atayabilirsin.
+- **Düşünme derinliği:** `llm.effort` (`low` … `max`). Varsayılan `medium`. Güncel modeller `temperature` kabul etmez, derinlik buradan ayarlanır. Değiştirmek yeni bir deney başlatır.
+- **Ret durumu:** Model bir isteği reddederse ya da `max_tokens`'a takılırsa döngü `ERROR` olarak kaydedilir, işlem açılmaz. `llm.fallbacks: true` iken reddedilen istek sunucu tarafında başka bir modelle yeniden denenir; hangi modelin cevap verdiği token kaydına yazılır.
 - **Gerçek harcama:** Her LLM çağrısının token sayısı veritabanına yazılır. `llm.prices_per_mtok` alanını doldurursan maliyet USD olarak da gösterilir. Fiyatları ben yazmadım, anthropic.com/pricing adresinden kendin gir.
 - Prompt caching eklenmedi. Sistem prompt'ları yaklaşık 300–400 token, önbelleğe alınabilecek minimum boyutun altında kalıyor. Bu yüzden kazanç sağlamaz.
 
@@ -123,7 +125,7 @@ sudo mkdir -p /opt/solunaro && sudo cp -r . /opt/solunaro && sudo chown -R solun
 cd /opt/solunaro
 pip install -r requirements.txt
 cp .env.example .env && nano .env          # ANTHROPIC_API_KEY
-nano config.yaml                           # llm.model'i güncel modelle değiştir
+nano config.yaml                           # model (varsayılan claude-opus-5-5) ve effort'u kontrol et
 
 python3 run.py data      # LLM'siz veri testi, ücretsiz. Önce bunu çalıştır
 python3 run.py once      # tek tam döngü (6 ajan)
@@ -141,6 +143,8 @@ Her kararın tam raporu (tüm veri paketi ve 6 ajanın JSON çıktısı) `data/r
 ## Maliyet
 
 Bir tam döngü 6 LLM çağrısı demek. Saatte bir çalıştığında günde en fazla yaklaşık 144 çağrı yapar. Açık pozisyon varken ve veri eskiyken bu sayı sıfıra iner. Gerçek token kullanımı her raporun `llm_usage` alanında yazar.
+
+Kaba tahmin (`claude-opus-5-5`, `effort: medium`, çağrı başına ~3 bin girdi + ~2 bin çıktı token'ı): döngü başına ~0,30 $, en kötü durumda (her saat aday var) günde ~7 $. Ön filtre çoğu saati elediği için gerçek harcama genelde bunun çok altında kalır. `run.py eval` gerçek USD harcamasını gösterir; tahmine değil ona bak.
 
 ## Testler
 

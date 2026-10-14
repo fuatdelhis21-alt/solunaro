@@ -45,9 +45,9 @@ def load_cfg(path):
 def make_engine(cfg):
     from desk.engine import Engine
     from desk.llm import AnthropicLLM
-    llm = AnthropicLLM(cfg["llm"]["model"], cfg["llm"]["max_tokens"],
-                       cfg["llm"]["temperature"], cfg["llm"]["timeout_seconds"],
-                       models=cfg["llm"].get("models") or {})
+    c = cfg["llm"]
+    llm = AnthropicLLM(c["model"], c["max_tokens"], c.get("effort"), c["timeout_seconds"],
+                       models=c.get("models") or {}, fallbacks=c.get("fallbacks", True))
     return Engine(cfg, llm)
 
 

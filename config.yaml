@@ -3,19 +3,26 @@
 # ANTHROPIC_API_KEY ortam değişkeninden okunur (.env / systemd EnvironmentFile).
 
 llm:
-  model: claude-sonnet-4-5        # docs.claude.com/en/docs/about-claude/models adresinden güncel modeli yaz
-  max_tokens: 1500
-  temperature: 0.2
-  timeout_seconds: 90
+  model: claude-opus-5-5          # güncel Opus. Liste: platform.claude.com/docs/en/about-claude/models
+  # Düşünme süresi. Bu modeller sıcaklık (temperature) ayarını kabul etmez; derinlik buradan ayarlanır.
+  # low | medium | high | xhigh | max. Daha yüksek = daha pahalı ve yavaş.
+  effort: medium
+  max_tokens: 16000               # düşünme token'ları da buna dahil; düşürürsen cevap yarıda kesilebilir
+  timeout_seconds: 180
+  # Model bir isteği güvenlik nedeniyle reddederse sunucu tarafında başka bir modelle yeniden dener.
+  # Haiku modellerinde bu özellik yok, onlara otomatik olarak gönderilmez.
+  fallbacks: true
   # Ajan bazında model (maliyet düşürme). Boş bırakılan ajan yukarıdaki `model`i kullanır.
-  # Örn. ATLAS ve LUNA için daha ucuz bir model yazabilirsin. Model adlarını
-  # docs.claude.com/en/docs/about-claude/models adresinden al.
+  # Model değiştirmek yeni bir deney başlatır (eval sonuçları karışmaz).
   models: {}
-  #  ATLAS: <ucuz-model-adı>
-  #  LUNA:  <ucuz-model-adı>
-  # USD maliyet raporu için 1M token başına fiyatlar (anthropic.com/pricing). Boşsa sadece token sayılır.
-  prices_per_mtok: {}
-  #  <model-adı>: { input: 0.0, output: 0.0 }
+  #  ATLAS: claude-haiku-5-5
+  #  LUNA:  claude-haiku-5-5
+  # USD maliyet raporu için 1M token başına fiyatlar (Ekim 2026, anthropic.com/pricing'den kontrol et).
+  prices_per_mtok:
+    claude-opus-5-5:   { input: 4.00, output: 20.00 }
+    claude-opus-5:     { input: 5.00, output: 25.00 }   # olası fallback modeli
+    claude-sonnet-5-5: { input: 2.00, output: 10.00 }
+    claude-haiku-5-5:  { input: 0.10, output: 0.50 }
 
 schedule:
   decide_every_minutes: 60        # 6 ajanlık karar döngüsü (saatlik mumlarla uyumlu)
@@ -59,7 +66,9 @@ paper:
 data:
   max_staleness_minutes: 90       # son kapanmış mum bundan eskiyse karar yok
   news_max_age_hours: 48
-  min_news_items: 1               # ORION için en az bu kadar güncel haber yoksa NEED MORE DATA
+  # ORION için en az bu kadar güncel haber yoksa işlem açılmaz. Piyasa türüne göre ayrı.
+  # Solana DEX tokenları ana akım RSS'te nadiren çıkar; dex: 1 yaparsan havuzlar neredeyse hiç işlem almaz.
+  min_news_items: { crypto: 1, dex: 0 }
   shadow_max_hours: 72            # alınmayan setup'lar en fazla bu kadar takip edilir
 
 markets:

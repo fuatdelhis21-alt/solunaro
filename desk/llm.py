@@ -15,6 +15,10 @@ class LLMError(Exception):
     pass
 
 
+class LLMRefusal(LLMError):
+    """Model declined or ran out of tokens. The cycle is journaled as ERROR; no trade."""
+
+
 def extract_json(text: str) -> dict:
     m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
     raw = m.group(1) if m else text[text.find("{"): text.rfind("}") + 1]
@@ -25,13 +29,13 @@ def extract_json(text: str) -> dict:
 
 
 class AnthropicLLM:
-    def __init__(self, model: str, max_tokens: int = 1500, temperature: float = 0.2,
-                 timeout: int = 90, models: dict | None = None):
+    def __init__(self, model: str, max_tokens: int = 16000, effort: str | None = "medium",
+                 timeout: int = 180, models: dict | None = None, fallbacks: bool = True):
         self.key = os.environ.get("ANTHROPIC_API_KEY")
         if not self.key:
             raise LLMError("ANTHROPIC_API_KEY is not set")
         self.model, self.max_tokens = model, max_tokens
-        self.temperature, self.timeout = temperature, timeout
+        self.effort, self.timeout, self.fallbacks = effort, timeout, fallbacks
         self.models = models or {}          # per-agent override, e.g. {"ATLAS": "<cheap model>"}
         self.usage = {"input_tokens": 0, "output_tokens": 0, "calls": 0}
         self.calls: list[dict] = []          # drained by the engine into sqlite after each cycle
@@ -42,11 +46,18 @@ class AnthropicLLM:
 
     def ask_json(self, system: str, user: str, agent: str | None = None) -> dict:
         model = self.models.get(agent) or self.model
-        body = {"model": model, "max_tokens": self.max_tokens,
-                "temperature": self.temperature, "system": system,
+        # Current models think adaptively by default and reject non-default temperature,
+        # so depth is steered with effort only. Thinking tokens count toward max_tokens.
+        body = {"model": model, "max_tokens": self.max_tokens, "system": system,
                 "messages": [{"role": "user", "content": user}]}
+        if self.effort:
+            body["output_config"] = {"effort": self.effort}
         headers = {"x-api-key": self.key, "anthropic-version": "2023-06-01",
                    "content-type": "application/json"}
+        # Server-side refusal fallback exists for Opus/Sonnet/Fable, not for Haiku.
+        if self.fallbacks and not model.startswith("claude-haiku"):
+            body["fallbacks"] = "default"
+            headers["anthropic-beta"] = "server-side-fallback-2026-07-01"
         last = None
         for attempt in range(3):
             try:
@@ -62,11 +73,21 @@ class AnthropicLLM:
                 self.usage["input_tokens"] += u.get("input_tokens", 0)
                 self.usage["output_tokens"] += u.get("output_tokens", 0)
                 self.usage["calls"] += 1
-                self.calls.append({"ts": int(time.time()), "agent": agent, "model": model,
+                served = d.get("model") or model         # differs from `model` after a fallback
+                self.calls.append({"ts": int(time.time()), "agent": agent, "model": served,
                                    "input_tokens": u.get("input_tokens", 0),
                                    "output_tokens": u.get("output_tokens", 0)})
-                text = "".join(b.get("text", "") for b in d.get("content", []))
+                stop = d.get("stop_reason")
+                if stop == "refusal":
+                    cat = (d.get("stop_details") or {}).get("category")
+                    raise LLMRefusal(f"{agent or model} refused (category={cat})")
+                if stop == "max_tokens":
+                    raise LLMRefusal(f"{agent or model} hit max_tokens={self.max_tokens}")
+                text = "".join(b.get("text", "") for b in d.get("content", [])
+                               if b.get("type") == "text")
                 return extract_json(text)
+            except LLMRefusal:
+                raise                                    # deterministic: retrying would not help
             except (requests.RequestException, LLMError) as e:
                 last = e
                 if isinstance(e, LLMError) and "HTTP 4" in str(e):
