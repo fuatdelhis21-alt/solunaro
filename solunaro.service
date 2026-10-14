@@ -11,6 +11,8 @@ EnvironmentFile=/opt/solunaro/.env
 ExecStart=/usr/bin/python3 /opt/solunaro/run.py loop
 Restart=on-failure
 RestartSec=30
+# Aynı sunucudaki sniper'ın önünde CPU almasın
+Nice=10
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/opt/solunaro
