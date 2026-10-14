@@ -48,6 +48,18 @@ class TestParsers(unittest.TestCase):
             p = D.dexscreener_pool("solana", "x")
         self.assertEqual((p["base"], p["price_usd"], p["liquidity_usd"]), ("SOL", 150.1, 1e6))
 
+    def test_dex_symbol_keyword_is_word_bounded(self):
+        stats = {"base": "RAY", "base_name": "Raydium", "quote": "SOL", "dex": "raydium"}
+        mcfg = {"chain": "solana", "interval": "hour", "lookback": 10}
+        with mock.patch.object(D, "geckoterminal_ohlcv", return_value=[]), \
+                mock.patch.object(D, "dexscreener_pool", return_value=stats):
+            s = D.dex_snapshot({"address": "x", "keywords": []}, mcfg)
+        news = [{"title": "Array of updates", "summary": ""},
+                {"title": "RAY rallies", "summary": ""},
+                {"title": "Raydium launch", "summary": ""}]
+        self.assertEqual([n["title"] for n in D.news_for(s.keywords, news)],
+                         ["RAY rallies", "Raydium launch"])
+
     def test_rss_age_filter_dedupe_and_keyword(self):
         fresh, old = formatdate(time.time() - 3600), formatdate(time.time() - 10 * 86400)
         xml = f"""<rss><channel>

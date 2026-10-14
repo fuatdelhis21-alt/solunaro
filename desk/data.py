@@ -154,7 +154,8 @@ def dex_snapshot(pool_cfg: dict, mcfg: dict) -> MarketSnapshot:
         snap.extra["pool"] = stats
         if stats.get("base"):
             snap.label = f"{stats['base']}/{stats.get('quote')} ({stats.get('dex')})"
-            snap.keywords += [stats["base"].lower()]
+            # padded: news_for() matches substrings, so a bare "ray" would hit "array"
+            snap.keywords += [f" {stats['base'].lower()} "]
             if stats.get("base_name"):
                 snap.keywords.append(stats["base_name"].lower())
     except (DataError, requests.RequestException) as e:
