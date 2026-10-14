@@ -1,0 +1,97 @@
+# Solunaro — Six Agent AI Trading Desk — PAPER ONLY
+# Bu dosyada hiçbir API anahtarı, cüzdan veya borsa bilgisi YOK ve olmamalı.
+# ANTHROPIC_API_KEY ortam değişkeninden okunur (.env / systemd EnvironmentFile).
+
+llm:
+  model: claude-sonnet-4-5        # docs.claude.com/en/docs/about-claude/models adresinden güncel modeli yaz
+  max_tokens: 1500
+  temperature: 0.2
+  timeout_seconds: 90
+  # Ajan bazında model (maliyet düşürme). Boş bırakılan ajan yukarıdaki `model`i kullanır.
+  # Örn. ATLAS ve LUNA için daha ucuz bir model yazabilirsin. Model adlarını
+  # docs.claude.com/en/docs/about-claude/models adresinden al.
+  models: {}
+  #  ATLAS: <ucuz-model-adı>
+  #  LUNA:  <ucuz-model-adı>
+  # USD maliyet raporu için 1M token başına fiyatlar (anthropic.com/pricing). Boşsa sadece token sayılır.
+  prices_per_mtok: {}
+  #  <model-adı>: { input: 0.0, output: 0.0 }
+
+schedule:
+  decide_every_minutes: 60        # 6 ajanlık karar döngüsü (saatlik mumlarla uyumlu)
+  monitor_every_minutes: 5        # açık paper pozisyonun stop/target kontrolü
+  daily_summary_hour_utc: 18      # Telegram günlük özet + dashboard (21:00 TR saati)
+
+# LLM'siz kıyas stratejisi. Aynı risk kurallarıyla ayrı bir paper hesapta işlem yapar.
+# Masa bunu yenemiyorsa LLM'ler değer katmıyor demektir.
+baseline:
+  enabled: true
+  trend_rsi_min: 45               # TREND: close > EMA20 > EMA50 ve RSI bu aralıkta
+  trend_rsi_max: 70
+  oversold_enabled: true          # OVERSOLD: RSI < oversold_rsi
+  oversold_rsi: 32
+  stop_atr: 1                     # 1, 1.5, 2, 2.5 veya 3 olmalı (grounding kuralı)
+  target_atr: 3                   # komisyon dahil R:R >= 2 için genelde 3 gerekir
+
+# Mekanik aday olmayan piyasalar LLM'e hiç gitmez (maliyet). Kapatırsan her saat ATLAS çalışır.
+prefilter:
+  enabled: true
+
+# İsteğe bağlı: CryptoPanic haberleri (oy sayılarıyla). CRYPTOPANIC_TOKEN env gerekir.
+# API sürümü değişirse url'yi CryptoPanic geliştirici sayfasındaki adresle güncelle.
+cryptopanic:
+  enabled: false
+  url: https://cryptopanic.com/api/developer/v2/posts/
+
+paper:
+  starting_balance_usd: 10000
+  max_open_positions: 1
+  max_loss_pct_per_trade: 0.25    # bakiyenin %0.25'i
+  min_reward_risk: 2.0
+  max_position_pct: 20            # tek pozisyonun nominal değeri bakiyenin en fazla %20'si
+  max_trades_per_day: 5
+  daily_kill_loss_pct: 1.0        # gün içi zarar %1'i geçerse o gün yeni işlem yok
+  max_stop_distance_pct: 8        # stop fiyattan en fazla %8 uzakta olabilir
+  max_target_distance_pct: 25     # hedef fiyattan en fazla %25 uzakta olabilir
+  cooldown_minutes_per_market: 180
+  leverage: none                  # değiştirilemez; kod yalnızca spot long açar
+
+data:
+  max_staleness_minutes: 90       # son kapanmış mum bundan eskiyse karar yok
+  news_max_age_hours: 48
+  min_news_items: 1               # ORION için en az bu kadar güncel haber yoksa NEED MORE DATA
+  shadow_max_hours: 72            # alınmayan setup'lar en fazla bu kadar takip edilir
+
+markets:
+  crypto:
+    enabled: true
+    interval: 1h
+    lookback: 200
+    fee_bps: 10
+    symbols:
+      - { symbol: SOLUSDT, keywords: [solana, " sol "] }
+      - { symbol: BTCUSDT, keywords: [bitcoin, btc] }
+      - { symbol: ETHUSDT, keywords: [ethereum, " eth "] }
+  dex:
+    enabled: true
+    chain: solana
+    interval: hour
+    lookback: 200
+    fee_bps: 30
+    slippage_bps: 50
+    min_liquidity_usd: 250000
+    min_volume_24h_usd: 500000
+    pools:
+      - { address: EzhAKYQNgL5iEW8tFfkqtrDLr3QsrFDiSA7DPHBhCRPF, keywords: [solana, raydium] }
+
+news_feeds:
+  - https://www.coindesk.com/arc/outboundfeeds/rss/
+  - https://cointelegraph.com/rss
+  - https://decrypt.co/feed
+
+storage:
+  db_path: data/desk.sqlite
+  baseline_db_path: data/baseline.sqlite
+  dashboard_path: data/dashboard.html
+  reports_dir: data/reports
+  kill_switch_file: STOP          # bu dosya varsa bot yeni işlem açmaz ve açık pozisyonu kapatır
