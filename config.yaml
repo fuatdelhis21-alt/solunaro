@@ -91,7 +91,10 @@ markets:
     min_liquidity_usd: 250000
     min_volume_24h_usd: 500000
     pools:
-      - { address: EzhAKYQNgL5iEW8tFfkqtrDLr3QsrFDiSA7DPHBhCRPF, keywords: [solana, raydium] }
+      # Adresler DexScreener'dan (Ekim 2026): likidite >= 250 bin $, 24s hacim >= 500 bin $.
+      # Kısa semboller boşlukla yazılır (" ray "), yoksa "array", "x-ray" gibi kelimelerle eşleşir.
+      - { address: C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg, keywords: [jupiter, " jup "] }   # JUP/SOL, Meteora
+      - { address: 2AXXcN6oN9bBT5owwmTH53C7QHUXvhLeu718Kqt8rvY2, keywords: [raydium, " ray "] }   # RAY/SOL, Raydium
 
 news_feeds:
   - https://www.coindesk.com/arc/outboundfeeds/rss/
