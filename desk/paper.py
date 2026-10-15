@@ -37,10 +37,15 @@ class PaperBroker:
         self.db = sqlite3.connect(db_path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(decisions)")}
-        if "experiment" not in cols:                       # migrate older databases
-            self.db.execute("ALTER TABLE decisions ADD COLUMN experiment TEXT")
-            self.db.commit()
+        # migrate older databases (additive only, existing rows are kept)
+        for table, col, typ in (("decisions", "experiment", "TEXT"),
+                                ("positions", "entry_ts", "INTEGER"),
+                                ("shadows", "entry_ts", "INTEGER"),
+                                ("llm_usage", "latency_ms", "INTEGER")):
+            cols = {r["name"] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.db.commit()
         self.experiment: str | None = None     # written on new decisions
         self.scope: str | None = None          # if set, eval queries only this experiment
         if self._meta("starting_balance") is None:
@@ -89,12 +94,13 @@ class PaperBroker:
         return cur.lastrowid
 
     # ---- shadows: counterfactual outcome of EVERY grounded setup, taken or not
-    def add_shadow(self, decision_id, market_id, entry, stop, target, taken, decision, verdicts):
+    def add_shadow(self, decision_id, market_id, entry, stop, target, taken, decision, verdicts,
+                   entry_ts: int | None = None):
         self.db.execute(
             "INSERT INTO shadows(decision_id,ts,market_id,entry,stop,target,taken,decision,"
-            "verdicts,status) VALUES(?,?,?,?,?,?,?,?,?,'OPEN')",
+            "verdicts,status,entry_ts) VALUES(?,?,?,?,?,?,?,?,?,'OPEN',?)",
             (decision_id, int(time.time()), market_id, entry, stop, target, int(taken), decision,
-             json.dumps(verdicts)))
+             json.dumps(verdicts), entry_ts))
         self.db.commit()
 
     def open_shadows(self) -> list[sqlite3.Row]:
@@ -138,6 +144,9 @@ class PaperBroker:
                             "output_tokens) VALUES(?,?,?,?,?,?)",
                             (c.get("ts", int(time.time())), decision_id, c.get("agent"),
                              c.get("model"), c.get("input_tokens", 0), c.get("output_tokens", 0)))
+            if c.get("latency_ms") is not None:
+                self.db.execute("UPDATE llm_usage SET latency_ms=? WHERE id=last_insert_rowid()",
+                                (int(c["latency_ms"]),))
         self.db.commit()
 
     def usage_rows(self) -> list[sqlite3.Row]:
@@ -171,12 +180,14 @@ class PaperBroker:
 
     # ---- orders
     def open(self, market_id, label, entry, qty, stop, target, fee_bps, slippage_bps,
-             decision_id) -> int:
+             decision_id, entry_ts: int | None = None) -> int:
+        """`entry_ts` = close time of the candle whose close is the entry price. Exits are
+        checked from the candle that opens at that time, exactly like the backtest."""
         cur = self.db.execute(
             "INSERT INTO positions(market_id,label,opened_ts,entry,qty,stop,target,fee_bps,"
-            "slippage_bps,status,decision_id) VALUES(?,?,?,?,?,?,?,?,?, 'OPEN', ?)",
+            "slippage_bps,status,decision_id,entry_ts) VALUES(?,?,?,?,?,?,?,?,?, 'OPEN', ?, ?)",
             (market_id, label, int(time.time()), entry, qty, stop, target, fee_bps,
-             slippage_bps, decision_id))
+             slippage_bps, decision_id, entry_ts))
         self.db.commit()
         return cur.lastrowid
 
@@ -184,15 +195,19 @@ class PaperBroker:
         exit_px = raw_exit * (1 - pos["slippage_bps"] / 10000)
         fees = (pos["entry"] + exit_px) * pos["qty"] * pos["fee_bps"] / 10000
         pnl = (exit_px - pos["entry"]) * pos["qty"] - fees
-        self.db.execute("UPDATE positions SET status='CLOSED', closed_ts=?, exit=?, exit_reason=?, "
-                        "pnl_usd=? WHERE id=?", (ts or int(time.time()), exit_px, reason, pnl, pos["id"]))
+        # status guard: a stale row (e.g. a second process) can never close or book PnL twice
+        cur = self.db.execute("UPDATE positions SET status='CLOSED', closed_ts=?, exit=?, "
+                              "exit_reason=?, pnl_usd=? WHERE id=? AND status='OPEN'",
+                              (ts or int(time.time()), exit_px, reason, pnl, pos["id"]))
         self.db.commit()
-        return pnl
+        return pnl if cur.rowcount else 0.0
 
     def check_exits(self, pos: sqlite3.Row, candles) -> tuple[str, float, int] | None:
-        """Walk closed candles that opened at/after entry. If one candle touches both
+        """Walk closed candles that opened at/after the entry time. If one candle touches both
         stop and target, assume the stop hit first (conservative). Gaps fill at the open."""
-        start = pos["opened_ts"] if "opened_ts" in pos.keys() else pos["ts"]
+        keys = pos.keys()
+        start = (pos["entry_ts"] if "entry_ts" in keys and pos["entry_ts"] is not None
+                 else pos["opened_ts"] if "opened_ts" in keys else pos["ts"])
         for c in candles:
             if c.ts < start:
                 continue

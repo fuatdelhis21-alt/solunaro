@@ -55,15 +55,22 @@ python3 run.py dashboard   # data/dashboard.html (Telegram ayarlıysa oraya da g
 
 ### İstatistikler ne kadar güvenilir? (kalibrasyon)
 
-Botu çevrimdışı olarak, **rastgele karar veren** sahte ajanlarla ve 40 farklı rastgele tohumla çalıştırdım (`tools/calibrate.py`). Rastgele ajanların hiçbir becerisi yok. Bu yüzden testlerin "bir şey bulduk" dediği her durum yanlış alarmdır:
+Bot çevrimdışı olarak, **rastgele karar veren** sahte ajanlarla, sentetik bir piyasada ve 40 farklı tohumla (SEED=1…40) çalıştırıldı (`tools/calibrate.py`). Rastgele ajanların hiçbir becerisi yok. Bu yüzden testlerin "bir şey bulduk" dediği her durum yanlış alarmdır:
 
-| Test | Yanlış alarm | Hedef |
+| Test | Yanlış alarm (40 tohum) | Hedef |
 |---|---|---|
 | Masa vs baseline | 0 / 40 | ≤ %5 |
-| Seçim testi (%95) | 2 / 40 (%5) | ≈ %5 |
-| Ajan değeri (%99, gün kümeli) | 2 / 160 (%1,25) | ≈ %1 |
+| Seçim testi (%95, gün kümeli) | 1 / 40 (%2,5) | ≈ %5 |
+| Ajan değeri (%99, gün kümeli), test başına | 4 / 200 (%2) | ≈ %1 |
+| Ajan değeri, en az bir ajanın işaretlendiği çalıştırma | 4 / 40 (%10) | ≈ %5 |
 
-İlk sürümde ajan değeri testi rastgele bir LUNA'yı "anlamlı" buldu. Bunun sebebi, saatlik setup'ların birbirine bağımlı olması: aynı gün açılan setup'lar çoğunlukla birlikte sonuçlanıyor. Düzeltmek için güven aralıklarını günlere göre kümeleyerek hesaplıyorum (cluster bootstrap). Beş ajan aynı anda test edildiği için de %95 yerine %99 güven aralığı kullanıyorum. Yine de tek bir raporda beş ajandan birinin yanlışlıkla işaretlenme olasılığı yaklaşık %6. Bir ajanı kapatmadan önce sonucun birkaç hafta boyunca tutarlı kaldığını gör.
+Ajan değeri testi hedefinden biraz daha sık yanlış alarm veriyor. 40 tohumluk bir ölçüm bu farkın kesin olduğunu göstermeye yetmez, ama temkinli ol: **tek bir raporda bir ajanın "ADDS INFORMATION" ya da "INVERSE SIGNAL" alması, o ajanı kapatmak ya da ona güvenmek için yeterli değildir.** Sonucun birkaç hafta boyunca tutarlı kalmasını bekle. Saatlik setup'lar birbirine bağımlı olduğu için güven aralıkları günlere göre kümelenerek hesaplanıyor (cluster bootstrap); beş ajan aynı anda test edildiği için %99 güven aralığı kullanılıyor.
+
+Kalibrasyon tekrarlanabilir: aynı `SEED` her zaman aynı sonucu verir (sabit sentetik başlangıç zamanı, paralel ajanlar için ajan bazında RNG). Tekrar çalıştırmak için:
+
+```bash
+for i in $(seq 1 40); do SEED=$i python3 tools/calibrate.py; done | grep CAL
+```
 
 ### Deneyler (experiment)
 
@@ -86,6 +93,11 @@ Bu komut baseline kuralını geçmiş mumlar üzerinde, canlıdaki risk kurallar
 - **Ajan çıktısı doğrulama:** Bir ajan izin verilen değerlerin dışında bir şey dönerse (ör. NOVA "STRONG BUY" derse ya da TITAN düz metin döndürürse) bu en temkinli seçenek olarak yorumlanır (REJECT veya NEED MORE DATA) ve rapora `invalid_outputs` olarak işlenir.
 - **LLM hatası:** API hatası ya da zaman aşımı durumunda o döngü `ERROR` olarak kaydedilir, işlem açılmaz ve harcanan token yine kaydedilir. Telegram uyarısı 1., 3. ve her 12. ardışık hatada gelir. Baseline hesabı aynı döngüde çalışmaya devam eder.
 - **Veri kesintisi:** 3 döngü üst üste hiçbir piyasadan veri gelmezse Telegram uyarısı gönderilir.
+- **Veri kalitesi:** NaN/sonsuz/sıfır/negatif fiyat, negatif hacim ya da tutarsız OHLC (ör. yüksek < kapanış) içeren bir mum serisinin tamamı reddedilir; o piyasa o döngüde atlanır. Tekrarlanan zaman damgaları ayıklanır, eksik mumlar `missing` alanına yazılır. DexScreener başka bir zincir veya havuz döndürürse istatistikler kullanılmaz.
+- **Ağ hataları:** 429/5xx ve zaman aşımlarında en fazla 2 tekrar (1 sn, 2 sn; `Retry-After` en fazla 10 sn). Sonsuz döngü yok.
+- **Sayısal doğrulama:** Fiyat, stop, hedef, komisyon, kayma ve hesap değerleri sonlu ve geçerli değilse risk motoru `inputs_valid` / `account_valid` kontrolüyle reddeder. Bilinmeyen değer hiçbir zaman olumlu sayılmaz.
+- **Tek süreç kilidi:** `run.py once` ve `run.py loop` aynı anda çalışamaz (`data/solunaro.lock`). Servis açıkken `once` çalıştırırsan bot açıkça uyarır.
+- **Yeniden başlatma:** Açık pozisyonlar, günlük limitler ve bekleme süresi SQLite'tan okunur. Kapanmış bir pozisyon ikinci kez kapanamaz, PnL iki kez yazılmaz.
 
 ## Maliyet düşürme
 
@@ -115,7 +127,17 @@ sudo bash install.sh          # kurulum, testler ve veri kontrolü yapar, botu b
 sudo bash install.sh --start  # her şey yolundaysa botu sürekli çalıştırır
 ```
 
-API anahtarını kurulum sırasında gizli olarak girersin. Anahtar sadece `/opt/solunaro/.env` dosyasına (izin 600) kaydedilir. Script'i tekrar çalıştırmak kodu günceller, `.env` dosyasına ve verilere dokunmaz.
+API anahtarını ilk kurulumda gizli olarak girersin; boş geçebilirsin (testler, veri kontrolü ve backtest anahtarsız çalışır). Anahtar sadece `/opt/solunaro/.env` dosyasına (izin 600) kaydedilir. Script'i tekrar çalıştırmak kodu günceller; **var olan `.env` dosyasına, verilere ve `STOP` dosyasına dokunmaz.** Servis çalışıyorsa güncelleme sırasında durdurulur ve testler geçerse yeniden başlatılır. Testler başarısız olursa kurulum hata koduyla durur.
+
+Anahtarın doğru olup olmadığını token harcamadan kontrol et:
+
+```bash
+sudo -u solunaro bash -c 'cd /opt/solunaro && set -a && . ./.env && set +a && .venv/bin/python run.py keycheck'
+```
+
+Anthropic anahtarları `sk-ant-` ile başlar. console.anthropic.com'daki listede görünen `apikey_...` değeri anahtarın kimliğidir, anahtarın kendisi değildir.
+
+**Yedekleme:** `sudo tar -C /opt/solunaro -czf ~/solunaro-yedek.tgz data .env` — geri yüklemek için servisi durdur, arşivi `/opt/solunaro` içine aç, `sudo chown -R solunaro:solunaro /opt/solunaro`.
 
 ## Kurulum (VPS, elle)
 
@@ -128,6 +150,7 @@ cp .env.example .env && nano .env          # ANTHROPIC_API_KEY
 nano config.yaml                           # model (varsayılan claude-opus-5-5) ve effort'u kontrol et
 
 python3 run.py data      # LLM'siz veri testi, ücretsiz. Önce bunu çalıştır
+python3 run.py keycheck  # API anahtarı geçerli mi (token harcamaz)
 python3 run.py once      # tek tam döngü (6 ajan)
 python3 run.py status    # paper bakiye, açık pozisyon, kararlar
 
@@ -152,7 +175,9 @@ Kaba tahmin (`claude-opus-5-5`, `effort: medium`, çağrı başına ~3 bin girdi
 python3 -m unittest discover -s tests
 ```
 
-40 çevrimdışı test var. Ağa ya da API anahtarına ihtiyaç duymazlar. Kapsadıkları konular: tam TRADE yolu, TITAN vetosunun NOVA'yı ezmesi, uydurma stop'un reddedilmesi, haber yoksa işlem olmaması, eski veride ve ön filtrede LLM'in çağrılmaması, kill switch, stop-önce kuralı ve PnL, API ayrıştırıcıları, baseline hesabı, shadow takibi, ajan isabeti, bootstrap hükmü, kümeli ajan değeri testi, deney filtresi ve eski veritabanı geçişi, ajan çıktısı doğrulama, LLM hatasında işlem açılmaması, veri kesintisi uyarısı, geçmiş testinde geleceğe bakmama, Binance sayfalama, token ve maliyet kaydı, CryptoPanic birleştirme, Telegram bildirimleri, günlük zamanlama ve dashboard.
+68 çevrimdışı test var. Ağa ya da API anahtarına ihtiyaç duymazlar; ayrıntılar `docs/TESTING.md` içinde. Kapsadıkları konular: tam TRADE yolu, TITAN vetosunun NOVA'yı ezmesi, uydurma stop'un reddedilmesi, haber yoksa işlem olmaması, eski veride ve ön filtrede LLM'in çağrılmaması, kill switch, stop-önce kuralı ve PnL, API ayrıştırıcıları, baseline hesabı, shadow takibi, ajan isabeti, bootstrap hükmü, kümeli ajan değeri testi, deney filtresi ve eski veritabanı geçişi, ajan çıktısı doğrulama, LLM hatasında işlem açılmaması, veri kesintisi uyarısı, geçmiş testinde geleceğe bakmama, Binance sayfalama, token ve maliyet kaydı, CryptoPanic birleştirme, Telegram bildirimleri, günlük zamanlama ve dashboard; ayrıca NaN/sonsuz/negatif girdiler, bozuk ve tekrarlanan mumlar, HTTP 429 ve zaman aşımı, girişten sonraki ilk mumun kontrolü, yeniden başlatma sonrası limitler, çift kapanış, süreç kilidi ve maliyet sonrası R:R.
+
+Mimari, risk modeli ve hazırlık durumu için: `docs/ARCHITECTURE.md`, `docs/RISK_MODEL.md`, `docs/READINESS.md`.
 
 ## Gerçek paraya geçmeden önce
 

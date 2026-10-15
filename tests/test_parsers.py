@@ -40,7 +40,7 @@ class TestParsers(unittest.TestCase):
         self.assertEqual([x.ts for x in c], [NOW - 7200, NOW - 3600])
 
     def test_dexscreener(self):
-        js = {"pairs": [{"dexId": "raydium", "baseToken": {"symbol": "SOL", "name": "Wrapped SOL"},
+        js = {"pairs": [{"chainId": "solana", "pairAddress": "x", "dexId": "raydium", "baseToken": {"symbol": "SOL", "name": "Wrapped SOL"},
                          "quoteToken": {"symbol": "USDC"}, "priceUsd": "150.1",
                          "liquidity": {"usd": 1e6}, "volume": {"h24": 2e6},
                          "txns": {"h1": {"buys": 10, "sells": 8}}, "priceChange": {"h1": 0.5}}]}

@@ -61,7 +61,9 @@ class AnthropicLLM:
         last = None
         for attempt in range(3):
             try:
+                t0 = time.monotonic()
                 r = requests.post(API_URL, json=body, headers=headers, timeout=self.timeout)
+                latency_ms = int((time.monotonic() - t0) * 1000)
                 if r.status_code in (429, 500, 502, 503, 529):
                     last = LLMError(f"HTTP {r.status_code}: {r.text[:200]}")
                     time.sleep(5 * (attempt + 1))
@@ -76,7 +78,8 @@ class AnthropicLLM:
                 served = d.get("model") or model         # differs from `model` after a fallback
                 self.calls.append({"ts": int(time.time()), "agent": agent, "model": served,
                                    "input_tokens": u.get("input_tokens", 0),
-                                   "output_tokens": u.get("output_tokens", 0)})
+                                   "output_tokens": u.get("output_tokens", 0),
+                                   "latency_ms": latency_ms, "stop_reason": d.get("stop_reason")})
                 stop = d.get("stop_reason")
                 if stop == "refusal":
                     cat = (d.get("stop_details") or {}).get("category")
