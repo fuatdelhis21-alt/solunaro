@@ -255,7 +255,45 @@ def full_report(desk_broker, base_broker, prices=None) -> dict:
             "shadows_by_decision": shadow_stats(desk_broker),
             "agent_accuracy": agent_accuracy(desk_broker),
             "llm_spend": llm_spend(desk_broker, prices),
-            "decision_counts": _counts(desk_broker)}
+            "decision_counts": _counts(desk_broker),
+            "operations": operations(desk_broker)}
+
+
+def _pct(vals: list[float], q: float):
+    if not vals:
+        return None
+    v = sorted(vals)
+    return v[min(int(q * len(v)), len(v) - 1)]
+
+
+def operations(broker) -> dict:
+    """Why cycles did not trade, LLM latency per agent, data health. Read from the journal."""
+    failed_checks: dict[str, int] = defaultdict(int)
+    no_trade: dict[str, int] = defaultdict(int)
+    for r in broker.decisions():
+        nova, reason = r["nova"], r["reason"] or ""
+        if nova in ("ERROR", "NO_MARKET", "NO_PICK"):
+            no_trade[nova] += 1
+        if "failed_checks=" in reason:
+            for name in reason.split("failed_checks=", 1)[1].rstrip(")").split(","):
+                if name and name != "none":
+                    failed_checks[name] += 1
+    lat: dict[str, list[int]] = defaultdict(list)
+    q = ("SELECT u.agent, u.latency_ms FROM llm_usage u LEFT JOIN decisions d "
+         "ON d.id=u.decision_id WHERE u.latency_ms IS NOT NULL")
+    args: tuple = ()
+    if broker.scope:
+        q += " AND d.experiment=?"
+        args = (broker.scope,)
+    for row in broker.db.execute(q, args):
+        lat[row["agent"]].append(row["latency_ms"])
+    last_ok = broker.get_meta("last_data_ok_ts")
+    return {"cycles_without_trade": dict(no_trade),
+            "overridden_trade_failed_checks": dict(failed_checks),
+            "llm_latency_ms": {a: {"n": len(v), "p50": _pct(v, .5), "p95": _pct(v, .95),
+                                   "p99": _pct(v, .99)} for a, v in lat.items()},
+            "data_fail_streak": int(broker.get_meta("fetch_fail_streak") or 0),
+            "last_data_ok_ts": int(last_ok) if last_ok else None}
 
 
 def _counts(broker) -> dict:

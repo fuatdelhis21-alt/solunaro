@@ -8,6 +8,7 @@
   python run.py eval      # desk vs baseline, counterfactuals, agent accuracy, LLM spend
   python run.py dashboard # write data/dashboard.html (and send to Telegram if configured)
   python run.py backtest  # historical test of the LLM-free baseline rule (no LLM, no cost)
+  python run.py keycheck  # is ANTHROPIC_API_KEY accepted? (lists models, no tokens, no cost)
 
 eval/dashboard only count the CURRENT experiment (prompts+rules+models fingerprint); add --all
 to include every experiment.
@@ -26,6 +27,50 @@ sys.path.insert(0, HERE)
 
 from desk import data as D  # noqa: E402
 from desk.indicators import summarize  # noqa: E402
+
+
+def acquire_lock(cfg):
+    """Only one process may trade the paper books (`once` while the service runs would
+    otherwise race for the same position slot). Held until the process exits."""
+    import fcntl
+    path = os.path.join(os.path.dirname(cfg["storage"]["db_path"]), "solunaro.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fh = open(path, "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys.exit("Başka bir Solunaro süreci çalışıyor (servis açık olabilir). "
+                 "Önce: sudo systemctl stop solunaro")
+    return fh
+
+
+def keycheck() -> int:
+    """GET /v1/models with the configured key. Prints only the HTTP status and the API's error
+    message; the key itself is never printed."""
+    import requests
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        print("ANTHROPIC_API_KEY boş. .env dosyasına ekle.")
+        return 1
+    try:
+        r = requests.get("https://api.anthropic.com/v1/models", timeout=20,
+                         headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    except requests.RequestException as e:
+        print("Bağlantı hatası:", type(e).__name__)
+        return 1
+    if r.status_code == 200:
+        print("HTTP 200: anahtar geçerli.")
+        return 0
+    try:
+        msg = r.json().get("error", {}).get("message", "")
+    except ValueError:
+        msg = ""
+    print(f"HTTP {r.status_code}: {msg[:200]}")
+    if not key.startswith("sk-ant-"):
+        print("Not: Anthropic API anahtarları 'sk-ant-' ile başlar. console.anthropic.com > "
+              "API Keys > Create Key penceresindeki değeri kopyala (listedeki 'apikey_...' "
+              "kimliği anahtar değildir).")
+    return 1
 
 
 def load_cfg(path):
@@ -127,8 +172,10 @@ def run_backtest(cfg, days):
     for r in results.values():
         r.pop("trade_list", None)
     print(json.dumps(results, indent=1, default=str))
+    failed_all = bool(results) and all("error" in r for r in results.values())
     print("\nNot: Bu sadece LLM'siz baseline kuralının geçmiş testidir. LLM masası geçmişte test "
           "edilemez (model geleceği 'biliyor' olabilir, geçmiş haber/duygu verisi yok).")
+    return 1 if failed_all else 0
 
 
 def brief(rep):
@@ -147,7 +194,7 @@ def brief(rep):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["once", "loop", "status", "data", "eval", "dashboard",
-                                    "backtest"])
+                                    "backtest", "keycheck"])
     ap.add_argument("--config", default=os.path.join(HERE, "config.yaml"))
     ap.add_argument("--all", action="store_true", help="eval/dashboard: include all experiments")
     ap.add_argument("--days", type=int, default=180, help="backtest: history length in days")
@@ -155,16 +202,21 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_cfg(a.config)
 
+    if a.cmd == "keycheck":
+        sys.exit(keycheck())
+
     if a.cmd == "data":
         from desk.engine import Engine
         eng = Engine.__new__(Engine)
         eng.cfg = cfg
+        ok_markets = 0
         for mid, (kind, item) in Engine.market_configs(eng).items():
             try:
                 s = Engine._fetch_market(eng, kind, item)
                 sm = summarize(s.candles)
                 print(mid, s.label, "price", s.last_price, "stale_min", round(s.staleness_minutes(), 1),
                       "rsi", sm["rsi14"], "levels", sm["levels"], "missing", s.missing)
+                ok_markets += 1
             except Exception as e:  # noqa: BLE001
                 print(mid, "FAILED:", e)
         try:
@@ -184,6 +236,8 @@ def main():
             print("fear&greed:", D.fear_greed()["latest"])
         except Exception as e:  # noqa: BLE001
             print("fear&greed FAILED:", e)
+        if not ok_markets:
+            sys.exit("Hiçbir piyasadan veri alınamadı.")
         return
 
     if a.cmd == "status":
@@ -192,8 +246,7 @@ def main():
         return
 
     if a.cmd == "backtest":
-        run_backtest(cfg, a.days)
-        return
+        sys.exit(run_backtest(cfg, a.days))
 
     if a.cmd == "eval":
         rep = eval_report(cfg, a.all)
@@ -211,6 +264,7 @@ def main():
             n.send_document(path, daily_text(rep)[:1000])
         return
 
+    _lock = acquire_lock(cfg)  # noqa: F841 — kept open for the process lifetime
     eng = make_engine(cfg)
     if a.cmd == "once":
         print(json.dumps({"closed": eng.monitor()}, default=str))

@@ -37,7 +37,7 @@ def experiment_id(cfg: dict) -> str:
         "min_news": (cfg.get("data") or {}).get("min_news_items"),
     }, sort_keys=True, default=str)
     name = cfg.get("experiment_name") or "exp"
-    return f"{name}-{hashlib.sha1(blob.encode()).hexdigest()[:8]}"
+    return f"{name}-{hashlib.sha1(blob.encode(), usedforsecurity=False).hexdigest()[:8]}"
 
 
 def min_news_for(dcfg: dict, kind: str) -> int:
@@ -202,11 +202,12 @@ class Engine:
             rk = risk.evaluate(sig, s.last_price, summ, p, account, s.fee_bps, s.slippage_bps)
             ok = rk.get("all_pass")
             did = self.base.log_decision(o["market_id"], "TRADE" if ok else "SKIP", sig["rule"],
-                                         ok, "; ".join(c["issue"] for c in rk["checks"]
+                                         ok, "; ".join(f"{c['name']}: {c['issue']}" for c in rk["checks"]
                                                        if c["result"] == "FAIL"), "")
             if ok:
                 pid = self.base.open(o["market_id"], s.label, rk["entry"], rk["qty"], rk["stop"],
-                                     rk["target"], s.fee_bps, s.slippage_bps, did)
+                                     rk["target"], s.fee_bps, s.slippage_bps, did,
+                                     entry_ts=self._entry_ts(s))
                 opened.append({"position_id": pid, "market_id": o["market_id"], "rule": sig["rule"]})
                 log.info("BASELINE OPEN #%s %s %s", pid, s.label, sig["rule"])
         return opened
@@ -334,22 +335,25 @@ class Engine:
         go = n_dec == "TRADE" and t_ver == "APPROVE" and rk.get("all_pass")
         reason = nova.get("reason", "")
         if n_dec == "TRADE" and not go:
-            reason = f"TRADE overridden by code gate (TITAN={t_ver}, code_pass={rk.get('all_pass')})"
+            reason = (f"TRADE overridden by code gate (TITAN={t_ver}, "
+                      f"failed_checks={','.join(risk.failed(rk)) or 'none'})")
             n_dec = "REJECT"
+        report["failed_checks"] = risk.failed(rk)
         did = self.broker.log_decision(pick, n_dec, t_ver, rk.get("all_pass", False), reason, "")
 
-        # Counterfactual: record every geometrically valid setup, taken or not
-        if rk.get("entry") and rk.get("stop") is not None and rk["stop"] < rk["entry"] < rk["target"]:
+        # Counterfactual: record every VALID setup (grounded levels, distances, R:R), taken or not.
+        # Account-level blocks (cooldown, limits, news) do not disqualify it; fabricated levels do.
+        if risk.setup_valid(rk):
             atlas_v = next((r.get("verdict") for r in atlas.get("ranking", [])
                             if r.get("market_id") == pick), None)
             self.broker.add_shadow(did, pick, rk["entry"], rk["stop"], rk["target"], go, n_dec, {
                 "ATLAS": atlas_v, "VEGA": vega.get("verdict"), "ORION": orion.get("verdict"),
                 "LUNA": luna.get("verdict"), "TITAN": t_ver, "NOVA": n_dec,
-                "CODE": "PASS" if rk.get("all_pass") else "FAIL"})
+                "CODE": "PASS" if rk.get("all_pass") else "FAIL"}, entry_ts=self._entry_ts(s))
 
         if go:
             pid = self.broker.open(pick, s.label, rk["entry"], rk["qty"], rk["stop"], rk["target"],
-                                   s.fee_bps, s.slippage_bps, did)
+                                   s.fee_bps, s.slippage_bps, did, entry_ts=self._entry_ts(s))
             report["paper_order"] = {"position_id": pid, "entry": rk["entry"], "qty": rk["qty"],
                                      "stop": rk["stop"], "target": rk["target"],
                                      "max_loss_usd": rk["max_loss_usd"]}
@@ -386,11 +390,18 @@ class Engine:
     def _health_fetch(self, any_ok: bool, overview: list[dict]):
         n = 0 if any_ok else int(self.broker.get_meta("fetch_fail_streak") or 0) + 1
         self.broker.put_meta("fetch_fail_streak", n)
+        if any_ok:
+            self.broker.put_meta("last_data_ok_ts", int(time.time()))
         if n == 3 or (n and n % 12 == 0):
             errs = "; ".join(str(o.get("missing"))[:120] for o in overview)[:600]
             self.notify.send(f"⚠️ {n} döngüdür hiçbir piyasadan veri alınamadı. Bot karar vermiyor.\n{errs}")
 
     # ------------------------------------------------------------ helpers
+    @staticmethod
+    def _entry_ts(s) -> int:
+        """Entry price = close of the last closed candle, so the entry happens at its close."""
+        return s.candles[-1].ts + s.interval_sec
+
     @staticmethod
     def _currency(market_id: str, s) -> str | None:
         if market_id.startswith("crypto:"):

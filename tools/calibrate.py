@@ -10,7 +10,9 @@ Results say NOTHING about real performance. No network, no API key, no cost.
 import math, os, random, sys, tempfile, time as _time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [ROOT, os.path.join(ROOT, "tests")]
-clock = {"t": (int(_time.time()) // 3600 - 400) * 3600 + 30}
+# Fixed synthetic epoch (2026-01-01 UTC) so a seed always reproduces the same run; a wall-clock
+# start shifted the UTC-day clusters between runs and changed the statistics.
+clock = {"t": 1767225600 + 30}
 _time.time = lambda: clock["t"]
 import yaml
 from desk.engine import Engine
@@ -20,7 +22,9 @@ from desk.notify import Notifier
 from desk import evaluate as E
 from desk.dashboard import build_html
 
-random.seed(int(os.environ.get("SEED", 7)))
+import random as _random
+SEED = int(os.environ.get("SEED", 7))
+random.seed(SEED)
 H = 3600
 start = clock["t"] - 30 - 200 * H
 path, p = [], 150.0
@@ -38,16 +42,19 @@ def fetch(kind, item):
 class RandLLM:
     def __init__(self): self.q = []
     def ask_json(self, system, user, agent=None):
+        # VEGA/ORION/LUNA run in parallel threads: one RNG per (seed, agent, time) keeps a seed
+        # reproducible regardless of thread scheduling.
+        rng = _random.Random(f"{SEED}-{agent}-{clock['t']}")
         self.q.append({"agent": agent, "model": "sim", "input_tokens": 1500, "output_tokens": 300})
         if agent == "ATLAS": return {"ranking": [{"market_id": "crypto:SOLUSDT", "verdict": "WATCH"}], "top_pick": "crypto:SOLUSDT"}
         if agent == "VEGA":
             s = summarize(fetch(None, None).candles); a = s["atr14"]; l = s["last_close"]
-            if random.random() < 0.3: return {"verdict": "NO SETUP", "setup": None}
+            if rng.random() < 0.3: return {"verdict": "NO SETUP", "setup": None}
             return {"verdict": "SETUP", "setup": {"direction": "LONG", "stop": l - a, "target": l + 3 * a}}
-        if agent == "ORION": return {"verdict": random.choice(["SUPPORTIVE", "NEUTRAL", "AGAINST"])}
-        if agent == "LUNA": return {"verdict": random.choice(["SUPPORTIVE", "NEUTRAL", "AGAINST"])}
-        if agent == "TITAN": return {"final_verdict": random.choice(["APPROVE", "APPROVE", "REJECT", "REVISE"])}
-        if agent == "NOVA": return {"decision": random.choice(["TRADE", "TRADE", "WAIT", "REJECT"]), "reason": "sim"}
+        if agent == "ORION": return {"verdict": rng.choice(["SUPPORTIVE", "NEUTRAL", "AGAINST"])}
+        if agent == "LUNA": return {"verdict": rng.choice(["SUPPORTIVE", "NEUTRAL", "AGAINST"])}
+        if agent == "TITAN": return {"final_verdict": rng.choice(["APPROVE", "APPROVE", "REJECT", "REVISE"])}
+        if agent == "NOVA": return {"decision": rng.choice(["TRADE", "TRADE", "WAIT", "REJECT"]), "reason": "sim"}
     def drain_calls(self): q, self.q = self.q, []; return q
 
 d = tempfile.mkdtemp()
@@ -83,4 +90,9 @@ taken = [s for s in eng.broker.shadows() if s["taken"]]
 print("taken shadows", len(taken), "positions", len(eng.broker.closed_positions()) + len(eng.broker.open_positions()))
 bad = [(s["status"], p["exit_reason"]) for s, p in zip(taken, eng.broker.closed_positions()) if s["status"] != p["exit_reason"]]
 print("shadow/position exit mismatches:", bad[:5], len(bad))
-import json as _j; print("CAL", _j.dumps({"desk": rep["verdict"].split(":")[0], "sel": (rep["selection_test"] or {}).get("ci95"), "agents": {k: v["verdict"] for k, v in rep["agent_value"].items()}}))
+import json as _j
+_sel = rep["selection_test"] or {}
+print("CAL", _j.dumps({"seed": SEED, "desk": rep["verdict"].split(":")[0],
+                       "sel": _sel.get("ci95"), "sel_verdict": _sel.get("verdict"),
+                       "sel_n": [_sel.get("n_taken"), _sel.get("n_skipped")],
+                       "agents": {k: v["verdict"] for k, v in rep["agent_value"].items()}}))

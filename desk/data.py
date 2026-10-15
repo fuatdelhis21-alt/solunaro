@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import email.utils
 import html
+import math
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -29,10 +30,29 @@ class DataError(Exception):
     pass
 
 
-def _get(url: str, params: dict | None = None, timeout: int = 15):
-    r = requests.get(url, params=params, headers=UA, timeout=timeout)
-    if r.status_code != 200:
-        raise DataError(f"{url} -> HTTP {r.status_code}")
+RETRY_STATUS = {429, 500, 502, 503, 504}
+
+
+def _get(url: str, params: dict | None = None, timeout: int = 15, retries: int = 2):
+    """GET with a bounded retry on 429/5xx/network errors (backoff 1s, 2s; Retry-After honoured
+    up to 10s). Never loops forever; the caller sees DataError and the market is skipped."""
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, params=params, headers=UA, timeout=timeout)
+        except requests.RequestException as e:
+            if attempt == retries:
+                raise DataError(f"{url} -> {type(e).__name__}") from e
+            time.sleep(2 ** attempt)
+            continue
+        if r.status_code == 200:
+            break
+        if r.status_code not in RETRY_STATUS or attempt == retries:
+            raise DataError(f"{url} -> HTTP {r.status_code}")
+        try:
+            wait = float(r.headers.get("Retry-After", 0))
+        except (TypeError, ValueError, AttributeError):
+            wait = 0
+        time.sleep(min(max(wait, 2 ** attempt), 10))
     return r
 
 
@@ -60,6 +80,28 @@ class MarketSnapshot:
         return max(0.0, (now - last_close_time) / 60)
 
 
+def clean_candles(candles: list[Candle], source: str) -> list[Candle]:
+    """Sort, drop exact duplicate timestamps (keep the last), and FAIL CLOSED on any candle with
+    a non-finite/non-positive price, negative volume or impossible OHLC (high < max(open, close)
+    or low > min(open, close)). One bad candle makes the whole series untrusted."""
+    by_ts: dict[int, Candle] = {}
+    for c in candles:
+        prices = (c.open, c.high, c.low, c.close)
+        if not all(math.isfinite(x) and x > 0 for x in prices):
+            raise DataError(f"{source}: invalid price in candle {c.ts}")
+        if not math.isfinite(c.volume) or c.volume < 0:
+            raise DataError(f"{source}: invalid volume in candle {c.ts}")
+        if c.high < max(c.open, c.close, c.low) or c.low > min(c.open, c.close, c.high):
+            raise DataError(f"{source}: inconsistent OHLC in candle {c.ts}")
+        by_ts[c.ts] = c
+    return [by_ts[k] for k in sorted(by_ts)]
+
+
+def gap_count(candles: list[Candle], interval_sec: int) -> int:
+    """Missing intervals between consecutive candles (DEX pools omit hours without trades)."""
+    return sum(max(0, (b.ts - a.ts) // interval_sec - 1) for a, b in zip(candles, candles[1:]))
+
+
 # ---------------------------------------------------------------- Binance
 def binance_klines(symbol: str, interval: str, limit: int) -> list[Candle]:
     last_err = None
@@ -80,7 +122,7 @@ def binance_klines(symbol: str, interval: str, limit: int) -> list[Candle]:
         out.append(Candle(ts=int(r[0]) // 1000, open=float(r[1]), high=float(r[2]),
                           low=float(r[3]), close=float(r[4]), volume=float(r[5]),
                           taker_buy_volume=float(r[9])))
-    return out
+    return clean_candles(out, f"binance {symbol}")
 
 
 def binance_24h(symbol: str) -> dict:
@@ -101,6 +143,8 @@ def crypto_snapshot(sym_cfg: dict, mcfg: dict) -> MarketSnapshot:
                           fetched_at=int(time.time()), fee_bps=mcfg.get("fee_bps", 10),
                           keywords=sym_cfg.get("keywords", []))
     snap.candles = binance_klines(symbol, mcfg["interval"], mcfg["lookback"])
+    if (g := gap_count(snap.candles, snap.interval_sec)):
+        snap.missing.append(f"{g} missing candle(s) in series")
     try:
         snap.extra["ticker_24h"] = binance_24h(symbol)
     except DataError as e:
@@ -118,7 +162,7 @@ def geckoterminal_ohlcv(chain: str, pool: str, timeframe: str, limit: int) -> li
     out = [Candle(ts=int(r[0]), open=float(r[1]), high=float(r[2]), low=float(r[3]),
                   close=float(r[4]), volume=float(r[5]))
            for r in sorted(rows, key=lambda r: r[0]) if int(r[0]) + step <= now]
-    return out
+    return clean_candles(out, f"geckoterminal {pool}")
 
 
 def dexscreener_pool(chain: str, pool: str) -> dict:
@@ -126,6 +170,10 @@ def dexscreener_pool(chain: str, pool: str) -> dict:
     pair = d.get("pair") or (d.get("pairs") or [None])[0]
     if not pair:
         raise DataError(f"dexscreener: pool {pool} not found")
+    # Never attach stats of a different pool/chain to this market.
+    if pair.get("chainId") != chain or str(pair.get("pairAddress", "")).lower() != pool.lower():
+        raise DataError(f"dexscreener: returned {pair.get('chainId')}/{pair.get('pairAddress')}, "
+                        f"expected {chain}/{pool}")
     return {
         "dex": pair.get("dexId"),
         "base": (pair.get("baseToken") or {}).get("symbol"),
@@ -149,6 +197,8 @@ def dex_snapshot(pool_cfg: dict, mcfg: dict) -> MarketSnapshot:
                           slippage_bps=mcfg.get("slippage_bps", 50),
                           keywords=list(pool_cfg.get("keywords", [])))
     snap.candles = geckoterminal_ohlcv(chain, pool, mcfg["interval"], mcfg["lookback"])
+    if (g := gap_count(snap.candles, snap.interval_sec)):
+        snap.missing.append(f"{g} missing candle(s) in series (hours without trades)")
     try:
         stats = dexscreener_pool(chain, pool)
         snap.extra["pool"] = stats
@@ -300,7 +350,7 @@ def binance_history(symbol: str, interval: str, total: int) -> list[Candle]:
             break
         end_ms = new_end
         time.sleep(0.2)
-    return [out[k] for k in sorted(out)][-total:]
+    return clean_candles(list(out.values()), f"binance history {symbol}")[-total:]
 
 
 def geckoterminal_history(chain: str, pool: str, timeframe: str, total: int) -> list[Candle]:
@@ -324,4 +374,4 @@ def geckoterminal_history(chain: str, pool: str, timeframe: str, total: int) -> 
             break
         before = oldest
         time.sleep(2.5)                      # GeckoTerminal free tier is ~30 req/min
-    return [out[k] for k in sorted(out)][-total:]
+    return clean_candles(list(out.values()), f"geckoterminal history {pool}")[-total:]
